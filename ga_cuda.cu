@@ -317,6 +317,12 @@ int main(int argc,char**argv){
         memcpy(&pop[i*N], base.data(), N*sizeof(int));
     }
 
+    cout << "FIT = ";
+    for (int i=0;i<POP;i++) cout << fitCPU[i] << " ";
+    cout << endl;
+    exit(0);
+
+
     cudaMemcpy(popGPU,pop.data(),POP*N*sizeof(int),cudaMemcpyHostToDevice);
 
     // RNG states
