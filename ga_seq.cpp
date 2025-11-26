@@ -232,16 +232,34 @@ int main(int argc, char **argv)
     }
 
     auto end = chrono::high_resolution_clock::now();
-    double ms = chrono::duration<double, milli>(end - start).count();
 
-    // ----------------------------------------------------------
-    // Output CSV
-    // ----------------------------------------------------------
-    ofstream fout("seq_results.csv", ios::app);
-    fout << dataset << "," << POP << "," << GEN << "," << ms << "\n";
-    fout.close();
+    // Convert to seconds (double precision)
+    double time_sec = chrono::duration<double>(end - start).count();
 
-    cout << "Sequential GA completed in " << ms << " ms\n";
+    // ------------------------------
+    // CSV HEADER CHECK + APPEND
+    // ------------------------------
+    bool write_header = false;
+
+    // If CSV does not exist → write header
+    {
+        std::ifstream fin("seq_results.csv");
+        if (!fin.good()) write_header = true;
+        fin.close();
+    }
+
+    {
+        std::ofstream fout("seq_results.csv", ios::app);
+        
+        if (write_header) {
+            fout << "dataset,pop,gen,time_sec\n";
+        }
+        
+        fout << dataset << "," << POP << "," << GEN << "," << time_sec << "\n";
+        fout.close();
+    }
+
+    cout << "Sequential GA completed in " << time_sec << " seconds\n";
     return 0;
 }
     
