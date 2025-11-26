@@ -170,7 +170,7 @@ __device__ inline void gpuMutate(int* c, curandState& st, int N) {
 }
 
 // ============================================================================
-// GPU 2-OPT Local Search (Parallel version)
+// GPU 2-OPT Local Search (Parallel version with dynamic allocation)
 // ============================================================================
 __global__ void gpu2Opt(int* pop, const int* __restrict__ dist, 
                         const int* eliteIndices, int numElites, int N) {
@@ -181,8 +181,12 @@ __global__ void gpu2Opt(int* pop, const int* __restrict__ dist,
     int* tour = &pop[idx * N];
     
     bool improved = true;
-    int maxIter = 50; // Limit iterations to prevent infinite loops
+    int maxIter = 20; // Reduced iterations for larger N
     int iter = 0;
+    
+    // Adaptive iteration limit based on N
+    if (N > 1500) maxIter = 10;
+    else if (N > 1000) maxIter = 15;
     
     while (improved && iter < maxIter) {
         improved = false;
@@ -218,13 +222,14 @@ __global__ void gpu2Opt(int* pop, const int* __restrict__ dist,
 }
 
 // ============================================================================
-// GPU Breed Kernel (Optimized)
+// GPU Breed Kernel (Optimized with dynamic allocation)
 // ============================================================================
 __global__ void gpuBreed(const int* __restrict__ pop, 
                          int* __restrict__ newPop, 
                          const int* __restrict__ fit,
                          int POP, int N, int ELITES,
-                         curandState* states) {
+                         curandState* states,
+                         unsigned char* globalUsed) {
     int id = blockIdx.x * blockDim.x + threadIdx.x;
     if (id >= POP || id < ELITES) return;
 
@@ -237,10 +242,8 @@ __global__ void gpuBreed(const int* __restrict__ pop,
     const int* P2 = &pop[p2 * N];
     int* child = &newPop[id * N];
 
-    // Allocate local memory for used array
-    unsigned char used[2048]; // Adjust size based on max N expected
-    
-    if (N > 2048) return; // Safety check
+    // Use global memory for used array (each thread gets its own section)
+    unsigned char* used = &globalUsed[id * N];
 
     // Crossover
     if (curand_uniform(&st) < CROSS_RATE) {
@@ -344,10 +347,13 @@ int main(int argc, char** argv) {
 
     // Allocate GPU memory
     int *popGPU, *newGPU, *distGPU, *fitGPU;
+    unsigned char *usedGPU; // For OX crossover
+    
     cudaMalloc(&popGPU, POP * N * sizeof(int));
     cudaMalloc(&newGPU, POP * N * sizeof(int));
     cudaMalloc(&distGPU, N * N * sizeof(int));
     cudaMalloc(&fitGPU, POP * sizeof(int));
+    cudaMalloc(&usedGPU, POP * N * sizeof(unsigned char)); // Global used array
 
     cudaMemcpy(distGPU, distCPU.data(), N * N * sizeof(int), cudaMemcpyHostToDevice);
 
@@ -399,18 +405,16 @@ int main(int argc, char** argv) {
             ELITES, N
         );
 
-        // 4) Apply 2-opt to elites on GPU
-        if (N <= 1000) { // Only for reasonable N sizes
-            gpu2Opt<<<ELITES, 1>>>(
-                newGPU, distGPU, 
-                thrust::raw_pointer_cast(d_indices.data()), 
-                ELITES, N
-            );
-        }
+        // 4) Apply 2-opt to elites on GPU (for all sizes now)
+        gpu2Opt<<<ELITES, 1>>>(
+            newGPU, distGPU, 
+            thrust::raw_pointer_cast(d_indices.data()), 
+            ELITES, N
+        );
 
         // 5) Breed remaining population
         gpuBreed<<<grid, block>>>(
-            popGPU, newGPU, fitGPU, POP, N, ELITES, states
+            popGPU, newGPU, fitGPU, POP, N, ELITES, states, usedGPU
         );
 
         // Swap populations
@@ -471,6 +475,7 @@ int main(int argc, char** argv) {
     cudaFree(distGPU);
     cudaFree(fitGPU);
     cudaFree(states);
+    cudaFree(usedGPU);
 
     return 0;
 }

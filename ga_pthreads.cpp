@@ -491,7 +491,7 @@ int main(int argc,char**argv){
     cout<<"Optimal length : "<<opt_len<<"\n";
     cout<<"GA best length : "<<ga_len<<"\n";
     cout<<"Error (%)      : "<<err<<"\n";
-    cout<<"Time (sec)     : "<<time_sec<<"\n";
+    cout<<"Time (sec)     : "<<time_sec<<"\n\n";
 
     return 0;
 }
