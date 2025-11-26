@@ -1,265 +1,363 @@
-// ga_seq.cpp — Sequential Genetic Algorithm for TSP (TSPLIB format)
+// FINAL FIXED GA FOR TSPLIB EUC_2D WITH 2-OPT LOCAL SEARCH
 // Compile: g++ ga_seq.cpp -O2 -std=c++17 -o ga_seq
-// Run:     ./ga_seq dataset.tsp POP GEN
+// Run:     ./ga_seq dataset.tsp POP GEN optimal_tour_file
+//
+// This version:
+//  - Correctly uses EUC_2D INT ROUND distances (TSPLIB standard)
+//  - Uses OX crossover
+//  - Uses mutation and tournament selection
+//  - Applies 2-opt to the TOP 5% elites each generation
+//  - Outputs CSV with optimal_len, ga_len, error_percent
 
 #include <bits/stdc++.h>
 using namespace std;
 
-// ----------------------------------------------------------------------
-// GA CONSTANTS (FROM PAPER)
-// ----------------------------------------------------------------------
-const double CROSS_RATE = 0.8;
-const double MUT_RATE   = 0.02;
-const double TOUR_PROB  = 0.8;
+static thread_local mt19937 rng(1234567);
 
-// RNG
-static thread_local std::mt19937 rng(1234567);
+const double CROSS_RATE = 0.9;
+const double MUT_RATE   = 0.10;
+const double TOUR_PROB  = 1.0;     // always prefer best parent
+const double ELITE_RATE = 0.05;    // top 5% get 2-opt
 
-// ----------------------------------------------------------------------
-// TSPLIB PARSER
-// ----------------------------------------------------------------------
-// Reads TSPLIB format:
-// NAME: ...
-// TYPE: TSP
-// DIMENSION: N
-// NODE_COORD_SECTION
-// id x y
-// id x y
-// ...
-// EOF
-// ----------------------------------------------------------------------
-void loadTSPLIB(const string &fname,
-                vector<pair<double,double>> &coords)
-{
+// ================================================================
+// TSPLIB LOADER
+// ================================================================
+struct TSPLIB {
+    vector<pair<double,double>> coords;
+    int N;
+};
+
+TSPLIB loadTSPLIB(const string &fname) {
     ifstream fin(fname);
     if (!fin.is_open()) {
-        cerr << "Error opening file: " << fname << "\n";
+        cerr << "Error opening " << fname << "\n";
         exit(1);
     }
 
+    TSPLIB D;
+    D.N = -1;
     string line;
-    int N = -1;
 
-    // First: find DIMENSION
     while (getline(fin, line)) {
         if (line.rfind("DIMENSION", 0) != string::npos) {
-            // Example: DIMENSION: 379
-            string tmp;
-            stringstream ss(line);
-            ss >> tmp >> tmp >> N; // crude but works for TSPLIB
+            string tmp; stringstream ss(line);
+            ss >> tmp >> tmp >> D.N;
         }
-        if (line.find("NODE_COORD_SECTION") != string::npos) break;
+        if (line.find("NODE_COORD_SECTION") != string::npos)
+            break;
     }
 
-    if (N <= 0) {
-        cerr << "Could not read DIMENSION or NODE_COORD_SECTION in file.\n";
-        exit(1);
-    }
+    if (D.N <= 0) { cerr<<"DIMENSION missing.\n"; exit(1); }
 
-    coords.clear();
-    coords.reserve(N);
+    D.coords.reserve(D.N);
 
-    // Now read lines until EOF
-    while (getline(fin, line)) {
+    while (getline(fin,line)) {
         if (line.find("EOF") != string::npos) break;
-        if (line.size() < 2) continue;
-
+        int id; double x,y;
         stringstream ss(line);
-        int idx;
-        double x, y;
-
-        // Format: id x y
-        if (!(ss >> idx >> x >> y)) continue;
-
-        coords.emplace_back(x, y);
+        if (!(ss>>id>>x>>y)) continue;
+        D.coords.emplace_back(x,y);
     }
 
-    if ((int)coords.size() != N) {
-        cerr << "Warning: expected " << N << " nodes, got " << coords.size() << "\n";
+    return D;
+}
+
+// ================================================================
+// TSPLIB EUC_2D distance
+// ================================================================
+inline int euc2d(double x1,double y1,double x2,double y2){
+    double dx=x1-x2, dy=y1-y2;
+    return int(sqrt(dx*dx + dy*dy) + 0.5);
+}
+
+// ================================================================
+// Build distance matrix
+// ================================================================
+vector<int> buildDist(const TSPLIB &D){
+    int N=D.N;
+    vector<int> dist(N*N);
+
+    for(int i=0;i<N;i++)
+        for(int j=0;j<N;j++)
+            dist[i*N+j] = euc2d(
+                D.coords[i].first,
+                D.coords[i].second,
+                D.coords[j].first,
+                D.coords[j].second
+            );
+
+    return dist;
+}
+
+// ================================================================
+// Fitness
+// ================================================================
+inline int calcFit(const vector<int>& pop,int idx,int N,const vector<int>& dist){
+    int sum=0;
+    int base = idx*N;
+    for (int i=0;i<N-1;i++)
+        sum += dist[ pop[base+i]*N + pop[base+i+1] ];
+    sum += dist[ pop[base+N-1]*N + pop[base] ];
+    return sum;
+}
+
+// ================================================================
+// Tournament selection
+// ================================================================
+int tournament(const vector<int>& fit,int POP){
+    uniform_int_distribution<int> pick(0,POP-1);
+    int a=pick(rng), b=pick(rng);
+    return (fit[a]<fit[b] ? a : b);
+}
+
+// ================================================================
+// OX crossover
+// ================================================================
+void oxCross(const vector<int>& p1,const vector<int>& p2,
+             vector<int>& child,int N)
+{
+    child.assign(N,-1);
+
+    int a=rng()%N;
+    int b=rng()%N;
+    if(a>b) swap(a,b);
+
+    vector<char> used(N,0);
+
+    for(int i=a;i<=b;i++){
+        child[i]=p1[i];
+        used[p1[i]]=1;
+    }
+
+    int fill=(b+1)%N;
+    int cur=(b+1)%N;
+
+    for(int k=0;k<N;k++){
+        int gene=p2[cur];
+        if(!used[gene]){
+            child[fill]=gene;
+            used[gene]=1;
+            fill=(fill+1)%N;
+        }
+        cur=(cur+1)%N;
     }
 }
 
-// ----------------------------------------------------------------------
-// Distance matrix
-// ----------------------------------------------------------------------
-void buildDistanceMatrix(const vector<pair<double,double>> &coords,
-                         vector<double> &dist)
-{
-    int N = coords.size();
-    dist.resize(N * N);
+// ================================================================
+// Mutation (swap)
+ // ================================================================
+inline void mutate(vector<int>& c,int N){
+    if ((double)rng()/rng.max() < MUT_RATE) {
+        int a=rng()%N, b=rng()%N;
+        swap(c[a],c[b]);
+    }
+}
 
-    for (int i = 0; i < N; i++) {
-        for (int j = 0; j < N; j++) {
-            double dx = coords[i].first  - coords[j].first;
-            double dy = coords[i].second - coords[j].second;
-            dist[i*N + j] = sqrt(dx*dx + dy*dy);
+// ================================================================
+// 2-opt Local Search
+// ================================================================
+void two_opt(vector<int>& t, int N, const vector<int>& dist){
+    bool improved=true;
+
+    while(improved){
+        improved=false;
+
+        for(int i=0;i<N-2;i++){
+            int A=t[i], B=t[i+1];
+
+            for(int j=i+2;j<N;j++){
+                int C=t[j];
+                int D=t[(j+1)%N];
+
+                int oldCost = dist[A*N+B] + dist[C*N+D];
+                int newCost = dist[A*N+C] + dist[B*N+D];
+
+                if(newCost < oldCost){
+                    reverse(t.begin()+i+1, t.begin()+j+1);
+                    improved=true;
+                }
+            }
         }
     }
 }
 
-// ----------------------------------------------------------------------
-// GA HELPERS
-// ----------------------------------------------------------------------
-int randInt(int a, int b) {
-    return std::uniform_int_distribution<int>(a, b)(rng);
+// ================================================================
+// Load optimal tour
+// ================================================================
+vector<int> loadOptimal(const string& opt,int N){
+    if(opt=="none") return {};
+
+    ifstream fin(opt);
+    if(!fin.is_open()){
+        cerr<<"Warning: cannot open "<<opt<<"\n";
+        return {};
+    }
+
+    vector<int> tour;
+    string line;
+    bool start=false;
+
+    auto clean = [&](string s){
+        // remove spaces & CRLF
+        s.erase(remove_if(s.begin(), s.end(),
+            [](char c){ return isspace((unsigned char)c); }), s.end());
+        return s;
+    };
+
+    while(getline(fin,line)){
+        if(line.find("TOUR_SECTION") != string::npos){
+            start = true;
+            continue;
+        }
+        if(!start) continue;
+
+        string s = clean(line);
+        if(s.empty()) continue;
+        if(s == "-1" || s == "EOF") break;
+
+        bool numeric = true;
+        for(char c : s){
+            if(!isdigit(c) && c!='-'){ numeric=false; break; }
+        }
+        if(!numeric) continue;
+
+        int city = stoi(s);
+        if(city >= 1 && city <= N)
+            tour.push_back(city-1);
+    }
+
+    return tour;
 }
 
-double randDouble() {
-    return std::uniform_real_distribution<double>(0.0, 1.0)(rng);
+inline int tourLen(const vector<int>& t,int N,const vector<int>& dist){
+    int sum=0;
+    for(int i=0;i<N-1;i++)
+        sum += dist[t[i]*N + t[i+1]];
+    sum += dist[t[N-1]*N + t[0]];
+    return sum;
 }
 
-double fitness(const vector<int> &pop, int idx, int N,
-               const vector<double> &dist)
-{
-    double f = 0;
-    for (int i = 0; i < N - 1; i++)
-        f += dist[ pop[idx*N + i] * N + pop[idx*N + i + 1] ];
-    f += dist[ pop[idx*N + N - 1] * N + pop[idx*N] ];
-    return f;
-}
-
-int tournament(const vector<double> &fit, int POP)
-{
-    int a = randInt(0, POP - 1);
-    int b = randInt(0, POP - 1);
-
-    if (randDouble() < TOUR_PROB)
-        return (fit[a] < fit[b] ? a : b);
-    else
-        return (fit[a] < fit[b] ? b : a);
-}
-
-// No-op crossover (paper uses single-parent single-point)
-void crossover(const vector<int> &parent, vector<int> &child, int N)
-{
-    // Copy-only crossover (paper did not use 2-parent PMX/OX)
-    // Single-point but maintains permutation because it's a copy.
-    child = parent;
-}
-
-// Swap mutation (movement type)
-void mutate(vector<int> &c, int N)
-{
-    int a = randInt(0, N-1);
-    int b = randInt(0, N-1);
-    swap(c[a], c[b]);
-}
-
-// ----------------------------------------------------------------------
+// ================================================================
 // MAIN
-// ----------------------------------------------------------------------
-int main(int argc, char **argv)
-{
-    if (argc < 4) {
-        cout << "Usage: ./ga_seq dataset.tsp POP GEN\n";
+// ================================================================
+int main(int argc,char**argv){
+    if(argc<5){
+        cout<<"Usage: ./ga_seq dataset.tsp POP GEN optimal_tour_file\n";
         return 0;
     }
 
-    string dataset = argv[1];
-    int POP = atoi(argv[2]);
-    int GEN = atoi(argv[3]);
+    string dataset=argv[1];
+    int POP=atoi(argv[2]);
+    int GEN=atoi(argv[3]);
+    string OPT=argv[4];
 
-    // ----------------------------------------------------------
-    // Load TSPLIB dataset
-    // ----------------------------------------------------------
-    vector<pair<double,double>> coords;
-    loadTSPLIB(dataset, coords);
-    int N = coords.size();
+    TSPLIB D=loadTSPLIB(dataset);
+    int N=D.N;
 
-    // ----------------------------------------------------------
-    // Build distance matrix
-    // ----------------------------------------------------------
-    vector<double> dist;
-    buildDistanceMatrix(coords, dist);
+    vector<int> dist=buildDist(D);
 
-    // ----------------------------------------------------------
-    // Allocate storage
-    // ----------------------------------------------------------
-    vector<int> pop(POP * N);
-    vector<int> newPop(POP * N);
-    vector<double> fit(POP);
+    // Population
+    vector<int> pop(POP*N), newPop(POP*N);
+    vector<int> fit(POP);
+    vector<pair<int,int>> ranked(POP);
 
-    // ----------------------------------------------------------
-    // init population
-    // ----------------------------------------------------------
     vector<int> base(N);
-    iota(base.begin(), base.end(), 0);
+    iota(base.begin(),base.end(),0);
 
-    for (int i = 0; i < POP; i++) {
-        shuffle(base.begin(), base.end(), rng);
-        for (int j = 0; j < N; j++)
-            pop[i*N + j] = base[j];
+    for(int i=0;i<POP;i++){
+        shuffle(base.begin(),base.end(),rng);
+        for(int j=0;j<N;j++)
+            pop[i*N+j]=base[j];
     }
 
-    // ----------------------------------------------------------
-    // GA loop
-    // ----------------------------------------------------------
-    auto start = chrono::high_resolution_clock::now();
+    int ELITES = max(1, int(POP * ELITE_RATE));
+    vector<int> child(N);
 
-    for (int g = 0; g < GEN; g++) {
+    auto start = chrono::steady_clock::now();
 
-        // Phase 1: fitness
-        for (int i = 0; i < POP; i++)
-            fit[i] = fitness(pop, i, N, dist);
+    for(int g=0; g<GEN; g++){
 
-        // Phase 2: reproduction
-        for (int i = 0; i < POP; i++) {
-            int p = tournament(fit, POP);
+        // 1) Compute fitness
+        for(int i=0;i<POP;i++){
+            fit[i] = calcFit(pop,i,N,dist);
+            ranked[i]={fit[i],i};
+        }
+        sort(ranked.begin(),ranked.end());
 
-            // Copy parent → child
-            for (int j = 0; j < N; j++)
-                newPop[i*N + j] = pop[p*N + j];
+        // 2) Elites + 2-opt
+        for(int e=0;e<ELITES;e++){
+            int idx = ranked[e].second;
 
-            // Crossover (single-parent single-point)
-            if (randDouble() < CROSS_RATE) {
-                int pos = randInt(1, N-2);
-                // Keep it simple: rotate at pos (still a valid permutation)
-                rotate(newPop.begin() + i*N,
-                    newPop.begin() + i*N + pos,
-                    newPop.begin() + i*N + N);
-            }
+            vector<int> eliteTour(pop.begin()+idx*N,
+                                  pop.begin()+idx*N+N);
 
-            // Mutation (swap)
-            if (randDouble() < MUT_RATE) {
-                int a = randInt(0, N-1);
-                int b = randInt(0, N-1);
-                swap(newPop[i*N + a], newPop[i*N + b]);
-            }
+            two_opt(eliteTour, N, dist);
+
+            for(int j=0;j<N;j++)
+                newPop[e*N+j]=eliteTour[j];
         }
 
-        // Phase 3: replace old pop
+        // 3) Generate children
+        for(int i=ELITES;i<POP;i++){
+            int p1=tournament(fit,POP);
+            int p2=tournament(fit,POP);
+
+            if((double)rng()/rng.max() < CROSS_RATE){
+                oxCross(
+                    vector<int>(pop.begin()+p1*N,pop.begin()+p1*N+N),
+                    vector<int>(pop.begin()+p2*N,pop.begin()+p2*N+N),
+                    child,N
+                );
+            } else {
+                child.assign(pop.begin()+p1*N, pop.begin()+p1*N+N);
+            }
+
+            mutate(child,N);
+
+            for(int j=0;j<N;j++)
+                newPop[i*N+j]=child[j];
+        }
+
         pop.swap(newPop);
     }
 
-    auto end = chrono::high_resolution_clock::now();
+    auto end = chrono::steady_clock::now();
+    double time_sec = chrono::duration<double>(end-start).count();
 
-    // Convert to seconds (double precision)
-    double time_sec = chrono::duration<double>(end - start).count();
+    // Compute final best
+    for(int i=0;i<POP;i++)
+        fit[i]=calcFit(pop,i,N,dist);
 
-    // ------------------------------
-    // CSV HEADER CHECK + APPEND
-    // ------------------------------
-    bool write_header = false;
+    int bestIdx = min_element(fit.begin(),fit.end()) - fit.begin();
+    int ga_len = calcFit(pop,bestIdx,N,dist);
 
-    // If CSV does not exist → write header
+    vector<int> optTour = loadOptimal(OPT,N);
+    int opt_len=-1;
+    if(!optTour.empty())
+        opt_len=tourLen(optTour,N,dist);
+
+    double err=-1;
+    if(opt_len>0)
+        err=(ga_len-opt_len)*100.0/opt_len;
+
+    // Write CSV
+    bool header=false;
     {
-        std::ifstream fin("seq_results.csv");
-        if (!fin.good()) write_header = true;
-        fin.close();
+        ifstream f("seq_results.csv");
+        if(!f.good()) header=true;
     }
+    ofstream fout("seq_results.csv",ios::app);
+    if(header)
+        fout<<"dataset,pop,gen,time_sec,optimal_len,ga_len,error_percent\n";
 
-    {
-        std::ofstream fout("seq_results.csv", ios::app);
-        
-        if (write_header) {
-            fout << "dataset,pop,gen,time_sec\n";
-        }
-        
-        fout << dataset << "," << POP << "," << GEN << "," << time_sec << "\n";
-        fout.close();
-    }
+    fout<<dataset<<","<<POP<<","<<GEN<<","<<time_sec<<","
+        <<opt_len<<","<<ga_len<<","<<err<<"\n";
 
-    cout << "Sequential GA completed in " << time_sec << " seconds\n";
+    cout<<"\n=== VALIDATION ===\n";
+    cout<<"Optimal length : "<<opt_len<<"\n";
+    cout<<"GA best length : "<<ga_len<<"\n";
+    cout<<"Error (%)      : "<<err<<"\n";
+    cout<<"Time (sec)     : "<<time_sec<<"\n";
+
     return 0;
 }
-    

@@ -1,11 +1,47 @@
 #!/bin/bash
 
 # -----------------------------------------
-# SELECT MODE
-# usage: ./run_tests.sh [seq|pthreads|cuda|all]
-# default = all
+# USAGE:
+#   ./run_tests.sh [mode]
+# mode: seq | pthreads | cuda | all
 # -----------------------------------------
+
 MODE=${1:-all}
+
+echo "MODE = $MODE"
+echo ""
+
+# -----------------------------------------
+# DATASETS + OPTIMAL TOURS
+# FORMAT: "dataset_path:optimal_tour_path"
+# If optimal_tour_path == none → binary receives "none"
+# -----------------------------------------
+
+DATASETS=(
+    "datasets/xqf131.tsp:optimal_tours/xqf131.opt.tour"
+    "datasets/pka379.tsp:optimal_tours/pka379.opt.tour"
+    "datasets/pbk411.tsp:optimal_tours/pbk411.opt.tour"
+    "datasets/xql662.tsp:optimal_tours/xql662.opt.tour"
+    "datasets/rbx711.tsp:optimal_tours/rbx711.opt.tour"
+    "datasets/xit1083.tsp:optimal_tours/xit1083.opt.tour"
+    "datasets/rbv1583.tsp:optimal_tours/rbv1583.opt.tour"
+    "datasets/djb2036.tsp:optimal_tours/djb2036.opt.tour"
+)
+
+# -----------------------------------------
+# POPULATION sizes
+# -----------------------------------------
+POPS=(1024 2048 4096 8192)
+
+# -----------------------------------------
+# GENERATIONS
+# -----------------------------------------
+GENS=(100 200 400 600 800 1000)
+
+# -----------------------------------------
+# THREAD counts for pthreads
+# -----------------------------------------
+THREADS=(2 4)
 
 # -----------------------------------------
 # SOURCE FILES
@@ -19,132 +55,75 @@ PTH_BIN="ga_pthreads"
 CUDA_BIN="ga_cuda"
 
 # -----------------------------------------
-# DATASETS (inside datasets/ folder)
+# COMPILATION
 # -----------------------------------------
-DATASETS=(
-    "datasets/xqf131.tsp"
-    "datasets/pka379.tsp"
-    "datasets/pbk411.tsp"
-    "datasets/xql662.tsp"
-    "datasets/rbx711.tsp"
-    "datasets/xit1083.tsp"
-)
 
-# -----------------------------------------
-# POPULATION SIZES
-# -----------------------------------------
-POPS=(1024 2048 4096 8192 16384)
-
-# -----------------------------------------
-# GENERATION COUNTS
-# -----------------------------------------
-GENS=(100 200 400)
-
-# -----------------------------------------
-# THREADS for pthreads
-# -----------------------------------------
-THREADS=(2 4)
-
-# -----------------------------------------
-# COMPILATION LOGIC
-# -----------------------------------------
 compile_seq() {
     echo "Compiling Sequential..."
     g++ $SEQ_SRC -O2 -std=c++17 -o $SEQ_BIN
-    if [[ $? -ne 0 ]]; then
-        echo "ERROR: Failed to compile $SEQ_SRC"
-        exit 1
-    fi
 }
 
 compile_pthreads() {
     echo "Compiling Pthreads..."
     g++ $PTH_SRC -O2 -std=c++17 -lpthread -o $PTH_BIN
-    if [[ $? -ne 0 ]]; then
-        echo "ERROR: Failed to compile $PTH_SRC"
-        exit 1
-    fi
 }
 
 compile_cuda() {
     echo "Compiling CUDA..."
     nvcc $CUDA_SRC -O2 -o $CUDA_BIN
-    if [[ $? -ne 0 ]]; then
-        echo "ERROR: Failed to compile $CUDA_SRC"
-        exit 1
-    fi
 }
 
-# -----------------------------------------
-# COMPILE BASED ON MODE
-# -----------------------------------------
-echo ""
-echo "========== COMPILATION PHASE =========="
-
+echo "========== COMPILATION =========="
 case "$MODE" in
-    seq)
-        compile_seq
-        ;;
-    pthreads)
-        compile_pthreads
-        ;;
-    cuda)
-        compile_cuda
-        ;;
+    seq) compile_seq ;;
+    pthreads) compile_pthreads ;;
+    cuda) compile_cuda ;;
     all)
         compile_seq
         compile_pthreads
-        compile_cuda
-        ;;
+        compile_cuda ;;
     *)
-        echo "Unknown mode: $MODE"
-        echo "Use: seq | pthreads | cuda | all"
-        exit 1
-        ;;
+        echo "Invalid mode: $MODE"
+        exit 1 ;;
 esac
-
-echo "Compilation complete."
 echo ""
 
 # -----------------------------------------
 # TEST EXECUTION
 # -----------------------------------------
-echo "========== TESTING PHASE (MODE = $MODE) =========="
-echo ""
 
-for dataset in "${DATASETS[@]}"; do
+echo "========== TESTING =========="
+
+for item in "${DATASETS[@]}"; do
+
+    dataset_file=$(echo "$item" | cut -d':' -f1)
+    optimal_file=$(echo "$item" | cut -d':' -f2)
+
     for pop in "${POPS[@]}"; do
         for gen in "${GENS[@]}"; do
 
-            # ------------------------
-            # SEQUENTIAL
-            # ------------------------
+            # ------- SEQ -------
             if [[ "$MODE" == "seq" || "$MODE" == "all" ]]; then
-                echo "SEQ => $dataset POP=$pop GEN=$gen"
-                ./$SEQ_BIN "$dataset" $pop $gen
+                echo "SEQ → $dataset_file POP=$pop GEN=$gen OPT=$optimal_file"
+                ./$SEQ_BIN "$dataset_file" $pop $gen "$optimal_file"
             fi
 
-            # ------------------------
-            # PTHREADS
-            # ------------------------
+            # ------- PTHREADS -------
             if [[ "$MODE" == "pthreads" || "$MODE" == "all" ]]; then
                 for t in "${THREADS[@]}"; do
-                    echo "PTHREADS => $dataset POP=$pop GEN=$gen THREADS=$t"
-                    ./$PTH_BIN "$dataset" $pop $gen $t
+                    echo "PTHREADS → $dataset_file POP=$pop GEN=$gen THREADS=$t OPT=$optimal_file"
+                    ./$PTH_BIN "$dataset_file" $pop $gen $t "$optimal_file"
                 done
             fi
 
-            # ------------------------
-            # CUDA
-            # ------------------------
+            # ------- CUDA -------
             if [[ "$MODE" == "cuda" || "$MODE" == "all" ]]; then
-                echo "CUDA => $dataset POP=$pop GEN=$gen"
-                ./$CUDA_BIN "$dataset" $pop $gen
+                echo "CUDA → $dataset_file POP=$pop GEN=$gen OPT=$optimal_file"
+                ./$CUDA_BIN "$dataset_file" $pop $gen "$optimal_file"
             fi
 
         done
     done
 done
 
-echo ""
-echo "========== ALL TESTS COMPLETED (MODE = $MODE) =========="
+echo "========== DONE =========="
