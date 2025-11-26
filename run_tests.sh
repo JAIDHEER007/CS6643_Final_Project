@@ -22,12 +22,12 @@ CUDA_BIN="ga_cuda"
 # DATASETS (inside datasets/ folder)
 # -----------------------------------------
 DATASETS=(
+    "datasets/xqf131.tsp"
     "datasets/pka379.tsp"
+    "datasets/pbk411.tsp"
+    "datasets/xql662.tsp"
     "datasets/rbx711.tsp"
     "datasets/xit1083.tsp"
-    "datasets/pbk411.tsp"
-    "datasets/xqf131.tsp"
-    "datasets/xql662.tsp"
 )
 
 # -----------------------------------------
