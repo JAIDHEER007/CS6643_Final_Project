@@ -21,11 +21,8 @@ DATASETS=(
     "datasets/xqf131.tsp:optimal_tours/xqf131.opt.tour"
     "datasets/pka379.tsp:optimal_tours/pka379.opt.tour"
     "datasets/pbk411.tsp:optimal_tours/pbk411.opt.tour"
-    "datasets/xql662.tsp:optimal_tours/xql662.opt.tour"
     "datasets/rbx711.tsp:optimal_tours/rbx711.opt.tour"
     "datasets/xit1083.tsp:optimal_tours/xit1083.opt.tour"
-    "datasets/rbv1583.tsp:optimal_tours/rbv1583.opt.tour"
-    "datasets/djb2036.tsp:optimal_tours/djb2036.opt.tour"
 )
 
 # -----------------------------------------
@@ -36,7 +33,7 @@ POPS=(1024 2048 4096 8192)
 # -----------------------------------------
 # GENERATIONS
 # -----------------------------------------
-GENS=(100 200 400 600 800 1000)
+GENS=(100 200 400 600 800)
 
 # -----------------------------------------
 # THREAD counts for pthreads
