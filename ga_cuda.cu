@@ -143,6 +143,14 @@ __device__ void gpuOX(
     }
 }
 
+__global__ void initRand(curandState *states, int POP, unsigned long seed)
+{
+    int id = blockIdx.x * blockDim.x + threadIdx.x;
+    if (id < POP) {
+        curand_init(seed, id, 0, &states[id]);
+    }
+}
+
 // ============================================================================
 // GPU Swap Mutation
 // ============================================================================
