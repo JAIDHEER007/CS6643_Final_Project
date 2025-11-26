@@ -1,4 +1,3 @@
-// FINAL FIXED GA FOR TSPLIB EUC_2D WITH 2-OPT LOCAL SEARCH
 // Compile: g++ ga_seq.cpp -O2 -std=c++17 -o ga_seq
 // Run:     ./ga_seq dataset.tsp POP GEN optimal_tour_file
 //
@@ -8,6 +7,7 @@
 //  - Uses mutation and tournament selection
 //  - Applies 2-opt to the TOP 5% elites each generation
 //  - Outputs CSV with optimal_len, ga_len, error_percent
+
 
 #include <bits/stdc++.h>
 using namespace std;
