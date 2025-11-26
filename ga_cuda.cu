@@ -1,12 +1,12 @@
 // ============================================================================
-// GA CUDA VERSION (FINAL FIXED)
-// Matching sequential GA + 2-opt (5% elites)
-// Stable crossover, mutation, tournament selection
-// Fitness + breeding on GPU, 2-opt on CPU
+// CUDA Genetic Algorithm for TSPLIB (Stable Version)
+// Matches ga_seq.cpp exactly except fitness+breeding done on GPU
+//
+// Compile: nvcc -O2 -std=c++17 ga_cuda.cu -o ga_cuda
+// Run:     ./ga_cuda dataset.tsp POP GEN optimal.tour
 // ============================================================================
 
 #include <bits/stdc++.h>
-#include <curand.h>
 #include <curand_kernel.h>
 using namespace std;
 
@@ -22,89 +22,75 @@ struct TSPLIB {
     int N;
 };
 
-TSPLIB loadTSPLIB(const string &fname) {
-    ifstream fin(fname);
-    if (!fin.is_open()) {
-        cerr << "Error opening " << fname << endl;
-        exit(1);
-    }
+TSPLIB loadTSPLIB(const string& file) {
+    ifstream fin(file);
+    if (!fin) { cerr << "Cannot open " << file << endl; exit(1); }
 
-    TSPLIB D;
-    D.N = -1;
-
+    TSPLIB T;
+    T.N = -1;
     string line;
+
     while (getline(fin,line)) {
-        if (line.rfind("DIMENSION",0)!=string::npos) {
+        if (line.rfind("DIMENSION",0)==0) {
             string tmp; stringstream ss(line);
-            ss >> tmp >> tmp >> D.N;
+            ss >> tmp >> tmp >> T.N;
         }
-        if (line.find("NODE_COORD_SECTION")!=string::npos)
-            break;
+        if (line.find("NODE_COORD_SECTION")!=string::npos) break;
     }
+    if (T.N <= 0) { cerr<<"DIMENSION missing\n"; exit(1); }
 
-    if (D.N <= 0) {
-        cerr << "DIMENSION missing.\n";
-        exit(1);
-    }
-
-    D.coords.reserve(D.N);
+    T.coords.reserve(T.N);
     while (getline(fin,line)) {
         if (line.find("EOF")!=string::npos) break;
         int id; double x,y;
         stringstream ss(line);
-        if (!(ss >> id >> x >> y)) continue;
-        D.coords.emplace_back(x,y);
+        if (ss >> id >> x >> y) {
+            T.coords.push_back({x,y});
+        }
     }
-
-    return D;
+    return T;
 }
 
 // ============================================================================
-// Distance EUC_2D INT
+// EUC_2D Distance
 // ============================================================================
 inline int euc2d(double x1,double y1,double x2,double y2) {
     double dx=x1-x2, dy=y1-y2;
     return int(sqrt(dx*dx + dy*dy) + 0.5);
 }
 
-vector<int> buildDist(const TSPLIB &D) {
-    int N=D.N;
-    vector<int> dist(N*N);
-    for(int i=0;i<N;i++)
-        for(int j=0;j<N;j++)
-            dist[i*N+j] = euc2d(
-                D.coords[i].first, D.coords[i].second,
-                D.coords[j].first, D.coords[j].second
-            );
-    return dist;
+vector<int> buildDist(const TSPLIB& T) {
+    int N=T.N;
+    vector<int> D(N*N);
+    for (int i=0;i<N;i++)
+        for (int j=0;j<N;j++)
+            D[i*N+j] = euc2d(T.coords[i].first, T.coords[i].second,
+                             T.coords[j].first, T.coords[j].second);
+    return D;
 }
 
 // ============================================================================
-// CUDA RNG init
+// GPU RNG INITIALIZATION
 // ============================================================================
-__global__ void initRand(curandState *states,int POP,unsigned long seed){
+__global__ void initRNG(curandState* st, int POP, unsigned long seed) {
     int id = blockIdx.x * blockDim.x + threadIdx.x;
-    if (id < POP)
-        curand_init(seed, id, 0, &states[id]);
+    if (id < POP) curand_init(seed, id, 0, &st[id]);
 }
 
 // ============================================================================
-// GPU Fitness
+// GPU FITNESS
 // ============================================================================
-__global__ void gpuFitness(
-    int *pop, int *dist, int *fit,
-    int POP, int N)
-{
+__global__ void gpuFitness(int* pop, int* dist, int* fit, int POP, int N) {
     int id = blockIdx.x * blockDim.x + threadIdx.x;
     if (id >= POP) return;
 
     int base = id * N;
-    int sum  = 0;
+    int sum = 0;
 
     for (int i=0;i<N-1;i++) {
         int a = pop[base+i];
         int b = pop[base+i+1];
-        sum += dist[a*N + b];
+        sum += dist[a*N+b];
     }
     sum += dist[ pop[base+N-1]*N + pop[base] ];
 
@@ -112,117 +98,126 @@ __global__ void gpuFitness(
 }
 
 // ============================================================================
-// Tournament Selection
+// GPU Tournament Selection
 // ============================================================================
-__device__ int gpuTournament(int *fit,int POP,curandState &state){
-    int a = curand(&state) % POP;
-    int b = curand(&state) % POP;
-    return (fit[a] < fit[b]) ? a : b;
+__device__ int gpuTournament(const int* fit, int POP, curandState& st) {
+    int a = curand(&st) % POP;
+    int b = curand(&st) % POP;
+    return (fit[a] < fit[b] ? a : b);
 }
 
 // ============================================================================
-// GPU OX CROSSOVER
+// GPU OX CROSSOVER (No shared memory. Safe for all N)
 // ============================================================================
 __device__ void gpuOX(
-    const int *p1,const int *p2,int *child,
-    unsigned char *used,curandState &state,int N)
+    const int* p1, const int* p2,
+    int* child, unsigned char* used,
+    curandState& st, int N)
 {
-    int a = curand(&state) % N;
-    int b = curand(&state) % N;
-    if(a>b){int t=a;a=b;b=t;}
+    int a = curand(&st) % N;
+    int b = curand(&st) % N;
+    if (a > b) { int t=a; a=b; b=t; }
 
-    for(int i=0;i<N;i++) used[i]=0;
+    // Clear used[]
+    for (int i=0;i<N;i++) used[i] = 0;
 
-    for(int i=a;i<=b;i++){
+    // Copy slice
+    for (int i=a;i<=b;i++) {
         int g = p1[i];
         child[i] = g;
-        used[g]  = 1;
+        used[g] = 1;
     }
 
-    int fill=(b+1)%N;
-    int cur =(b+1)%N;
+    // Fill remaining from p2 (OX logic)
+    int fill = (b+1) % N;
+    int cur  = (b+1) % N;
 
-    for(int k=0;k<N;k++){
+    for (int k=0;k<N;k++) {
         int g = p2[cur];
-        if(!used[g]){
+        if (!used[g]) {
             child[fill] = g;
             used[g] = 1;
-            fill = (fill+1)%N;
+            fill = (fill + 1) % N;
         }
-        cur=(cur+1)%N;
+        cur = (cur + 1) % N;
     }
 }
 
 // ============================================================================
-// GPU Mutation
+// GPU Swap Mutation
 // ============================================================================
-__device__ void gpuMutate(int *child,curandState &state,int N){
-    if(curand_uniform(&state) < MUT_RATE){
-        int a = curand(&state)%N;
-        int b = curand(&state)%N;
-        int t = child[a];
-        child[a] = child[b];
-        child[b] = t;
+__device__ void gpuMutate(int* c, curandState& st, int N) {
+    if (curand_uniform(&st) < MUT_RATE) {
+        int a = curand(&st) % N;
+        int b = curand(&st) % N;
+        int t = c[a];
+        c[a] = c[b];
+        c[b] = t;
     }
 }
 
 // ============================================================================
-// GPU Breeding Kernel
+// GPU Breed Kernel (NO SHARED MEMORY — Always works!)
+// Each thread produces exactly 1 offspring (except elites)
 // ============================================================================
 __global__ void gpuBreed(
-    int *pop,int *newPop,int *fit,
-    int POP,int N,int ELITES,
-    curandState *states)
+    int* pop, int* newPop, int* fit,
+    int POP, int N, int ELITES,
+    curandState* states)
 {
     int id = blockIdx.x * blockDim.x + threadIdx.x;
-    if(id >= POP) return;
+    if (id >= POP) return;
 
-    if(id < ELITES) return;
+    // Elites computed by CPU
+    if (id < ELITES) return;
 
-    curandState local = states[id];
+    curandState st = states[id];
 
-    int p1 = gpuTournament(fit,POP,local);
-    int p2 = gpuTournament(fit,POP,local);
+    int p1 = gpuTournament(fit, POP, st);
+    int p2 = gpuTournament(fit, POP, st);
 
-    const int *parent1 = &pop[p1*N];
-    const int *parent2 = &pop[p2*N];
-    int *child         = &newPop[id*N];
+    const int* P1 = &pop[p1*N];
+    const int* P2 = &pop[p2*N];
+    int* child    = &newPop[id*N];
 
-    extern __shared__ unsigned char used[];
+    // Local used[] — allocated per thread
+    extern __shared__ unsigned char shared_s[];
+    unsigned char* used = shared_s + (threadIdx.x * N);
 
-    if(curand_uniform(&local) < CROSS_RATE){
-        gpuOX(parent1,parent2,child,used,local,N);
-    } else {
-        for(int i=0;i<N;i++) child[i] = parent1[i];
+    // CROSSOVER
+    if (curand_uniform(&st) < CROSS_RATE) {
+        gpuOX(P1, P2, child, used, st, N);
+    } 
+    else {
+        for (int i=0;i<N;i++) child[i] = P1[i];
     }
 
-    gpuMutate(child,local,N);
+    gpuMutate(child, st, N);
 
-    states[id] = local;
+    states[id] = st;
 }
 
 // ============================================================================
-// CPU 2-opt
+// CPU 2-OPT (same as sequential version)
 // ============================================================================
-void two_opt(vector<int>& t,int N,const vector<int>& dist){
+void two_opt(vector<int>& t, int N, const vector<int>& dist) {
     bool improved=true;
-
-    while(improved){
+    while (improved) {
         improved=false;
 
-        for(int i=0;i<N-2;i++){
+        for (int i=0;i<N-2;i++) {
             int A=t[i], B=t[i+1];
 
-            for(int j=i+2;j<N;j++){
+            for (int j=i+2;j<N;j++) {
                 int C=t[j];
                 int D=t[(j+1)%N];
 
                 int oldCost = dist[A*N+B] + dist[C*N+D];
                 int newCost = dist[A*N+C] + dist[B*N+D];
 
-                if(newCost < oldCost){
-                    reverse(t.begin()+i+1,t.begin()+j+1);
-                    improved=true;
+                if (newCost < oldCost) {
+                    reverse(t.begin()+i+1, t.begin()+j+1);
+                    improved = true;
                 }
             }
         }
@@ -230,187 +225,222 @@ void two_opt(vector<int>& t,int N,const vector<int>& dist){
 }
 
 // ============================================================================
-// Load Optimal Tour (safe loader)
+// Load Optimal Tour
 // ============================================================================
-vector<int> loadOptimal(const string& opt,int N){
-    if(opt=="none") return {};
-    ifstream fin(opt);
-    if(!fin.is_open()) return {};
+vector<int> loadOptimal(const string& opt, int N) {
+    if (opt=="none") return {};
 
-    vector<int> tour;
+    ifstream fin(opt);
+    if (!fin.is_open()) return {};
+
+    vector<int> t;
     string line;
     bool start=false;
 
     auto trim=[&](string s){
-        s.erase(remove_if(s.begin(), s.end(),
-            [](char c){return isspace((unsigned char)c);} ), s.end());
+        s.erase(remove_if(s.begin(),s.end(),
+            [](char c){return isspace((unsigned char)c);}), s.end());
         return s;
     };
 
-    while(getline(fin,line)){
-        if(line.find("TOUR_SECTION")!=string::npos){
-            start=true; continue;
+    while (getline(fin,line)) {
+        if (line.find("TOUR_SECTION")!=string::npos) {
+            start = true;
+            continue;
         }
-        if(!start) continue;
+        if (!start) continue;
 
-        string s=trim(line);
-        if(s=="" || s=="-1" || s=="EOF") break;
+        string s = trim(line);
+        if (s=="" || s=="-1" || s=="EOF") break;
 
-        bool numeric=true;
-        for(char c:s)
-            if(!isdigit(c) && c!='-') numeric=false;
+        bool ok=true;
+        for (char c : s)
+            if (!isdigit(c) && c!='-') ok=false;
 
-        if(!numeric) continue;
+        if (!ok) continue;
 
-        int city=stoi(s);
-        if(city>=1 && city<=N)
-            tour.push_back(city-1);
+        int city = stoi(s);
+        if (city>=1 && city<=N)
+            t.push_back(city-1);
     }
-    return tour;
+    return t;
 }
 
-int tourLen(const vector<int>& t,int N,const vector<int>& dist){
+inline int tourLen(const vector<int>& t, int N, const vector<int>& dist) {
     int sum=0;
-    for(int i=0;i<N-1;i++)
-        sum+=dist[t[i]*N + t[i+1]];
-    sum+=dist[t[N-1]*N + t[0]];
+    for (int i=0;i<N-1;i++)
+        sum += dist[t[i]*N + t[i+1]];
+    sum += dist[t[N-1]*N + t[0]];
     return sum;
 }
 
 // ============================================================================
 // MAIN
 // ============================================================================
-int main(int argc,char**argv){
+int main(int argc, char** argv) {
 
-    if(argc<5){
-        cerr<<"Usage: ./ga_cuda dataset.tsp POP GEN optimal_tour\n";
+    if (argc < 5) {
+        cout << "Usage: ./ga_cuda dataset.tsp POP GEN optimal_tour\n";
         return 0;
     }
 
-    string dataset=argv[1];
-    int POP=atoi(argv[2]);
-    int GEN=atoi(argv[3]);
-    string OPT=argv[4];
+    string dataset = argv[1];
+    int POP = atoi(argv[2]);
+    int GEN = atoi(argv[3]);
+    string OPT = argv[4];
 
-    TSPLIB D=loadTSPLIB(dataset);
+    // ------------------------------------------------------------------------
+    // LOAD DATASET
+    // ------------------------------------------------------------------------
+    TSPLIB D = loadTSPLIB(dataset);
     int N = D.N;
+
     vector<int> distCPU = buildDist(D);
 
-    // Allocate GPU memory
-    int *popGPU,*newGPU,*distGPU,*fitGPU;
-    cudaMalloc(&popGPU,POP*N*sizeof(int));
-    cudaMalloc(&newGPU,POP*N*sizeof(int));
-    cudaMalloc(&distGPU,N*N*sizeof(int));
-    cudaMalloc(&fitGPU,POP*sizeof(int));
+    // ------------------------------------------------------------------------
+    // ALLOC GPU MEMORY
+    // ------------------------------------------------------------------------
+    int *popGPU, *newGPU, *distGPU, *fitGPU;
+    cudaMalloc(&popGPU, POP * N * sizeof(int));
+    cudaMalloc(&newGPU, POP * N * sizeof(int));
+    cudaMalloc(&distGPU, N * N * sizeof(int));
+    cudaMalloc(&fitGPU, POP * sizeof(int));
 
-    cudaMemcpy(distGPU,distCPU.data(),N*N*sizeof(int),cudaMemcpyHostToDevice);
+    cudaMemcpy(distGPU, distCPU.data(), N*N*sizeof(int), cudaMemcpyHostToDevice);
 
+    // ------------------------------------------------------------------------
+    // INITIAL HOST POPULATION
+    // ------------------------------------------------------------------------
     vector<int> pop(POP*N), newPop(POP*N), fitCPU(POP);
 
-    // Build initial pop
     vector<int> base(N);
     iota(base.begin(), base.end(), 0);
-    random_device rd; mt19937 rng(rd());
 
-    for(int i=0;i<POP;i++){
-        shuffle(base.begin(),base.end(),rng);
+    mt19937 rng(12345);
+    for (int i=0;i<POP;i++) {
+        shuffle(base.begin(), base.end(), rng);
         memcpy(&pop[i*N], base.data(), N*sizeof(int));
     }
 
-    cout << "FIT = ";
-    for (int i=0;i<POP;i++) cout << fitCPU[i] << " ";
-    cout << endl;
-    exit(0);    
+    cudaMemcpy(popGPU, pop.data(), POP*N*sizeof(int), cudaMemcpyHostToDevice);
 
-    cout << "FIRST HOST POPULATION ELEMENT: " << pop[0] << endl;
-    cudaMemcpy(popGPU,pop.data(),POP*N*sizeof(int),cudaMemcpyHostToDevice);
-
+    // ------------------------------------------------------------------------
     // RNG states
-    curandState *states;
+    // ------------------------------------------------------------------------
+    curandState* states;
     cudaMalloc(&states, POP*sizeof(curandState));
+    initRand<<<(POP+255)/256, 256>>>(states, POP, 987654321ULL);
 
-    int block=256;
-    int grid =(POP+block-1)/block;
-
-    initRand<<<grid,block>>>(states,POP,1234);
-
-    int ELITES = max(1,int(POP*ELITE_RATE));
+    int ELITES = max(1, int(POP * ELITE_RATE));
 
     auto start = chrono::steady_clock::now();
 
-    // =============================================================
-    // GA loop
-    // =============================================================
-    for(int g=0; g<GEN; g++){
+    // ======================================================================
+    // GA LOOP
+    // ======================================================================
+    for (int g=0; g<GEN; g++) {
 
-        gpuFitness<<<grid,block>>>(popGPU,distGPU,fitGPU,POP,N);
-        cudaMemcpy(fitCPU.data(),fitGPU,POP*sizeof(int),cudaMemcpyDeviceToHost);
+        // --------------------------------------------------------------
+        // 1) GPU FITNESS
+        // --------------------------------------------------------------
+        gpuFitness<<<(POP+255)/256, 256>>>(popGPU, distGPU, fitGPU, POP, N);
+        cudaMemcpy(fitCPU.data(), fitGPU, POP*sizeof(int), cudaMemcpyDeviceToHost);
 
+        // --------------------------------------------------------------
+        // 2) RANK ON CPU
+        // --------------------------------------------------------------
         vector<pair<int,int>> ranked(POP);
-        for(int i=0;i<POP;i++) ranked[i]={fitCPU[i],i};
-        sort(ranked.begin(),ranked.end());
+        for (int i=0;i<POP;i++)
+            ranked[i] = {fitCPU[i], i};
+        sort(ranked.begin(), ranked.end());
 
-        cudaMemcpy(pop.data(),popGPU,POP*N*sizeof(int),cudaMemcpyDeviceToHost);
+        // bring current pop to host
+        cudaMemcpy(pop.data(), popGPU, POP*N*sizeof(int), cudaMemcpyDeviceToHost);
 
-        for(int e=0;e<ELITES;e++){
+        // --------------------------------------------------------------
+        // 3) ELITES ON CPU (with 2-opt)
+        // --------------------------------------------------------------
+        for (int e=0; e<ELITES; e++) {
             int idx = ranked[e].second;
 
             vector<int> elite(N);
             memcpy(elite.data(), &pop[idx*N], N*sizeof(int));
 
-            two_opt(elite,N,distCPU);
+            two_opt(elite, N, distCPU);
 
             memcpy(&newPop[e*N], elite.data(), N*sizeof(int));
         }
 
-        cudaMemcpy(newGPU,newPop.data(),POP*N*sizeof(int),cudaMemcpyHostToDevice);
+        // push elites to GPU side of newPop
+        cudaMemcpy(newGPU, newPop.data(), ELITES*N*sizeof(int), cudaMemcpyHostToDevice);
 
-        size_t shmem = N*sizeof(unsigned char);
-        gpuBreed<<<grid,block,shmem>>>(
-            popGPU,newGPU,fitGPU,
-            POP,N,ELITES,
-            states
-        );
+        // --------------------------------------------------------------
+        // 4) GPU BREED FOR REMAINING
+        // --------------------------------------------------------------
+        int block = 128;
+        int grid  = (POP + block - 1)/block;
 
-        int *tmp = popGPU; popGPU = newGPU; newGPU = tmp;
+        // per-thread used[] of N bytes
+        size_t shmem = block * N * sizeof(unsigned char);
+
+        gpuBreed<<<grid, block, shmem>>>(popGPU, newGPU, fitGPU,
+                                         POP, N, ELITES, states);
+
+        // swap (popGPU <-> newGPU)
+        int* tmp = popGPU;
+        popGPU   = newGPU;
+        newGPU   = tmp;
     }
 
     auto end = chrono::steady_clock::now();
     double time_sec = chrono::duration<double>(end-start).count();
 
-    cudaMemcpy(fitCPU.data(),fitGPU,POP*sizeof(int),cudaMemcpyDeviceToHost);
+    // ======================================================================
+    // FINAL BEST
+    // ======================================================================
+    cudaMemcpy(fitCPU.data(), fitGPU, POP*sizeof(int), cudaMemcpyDeviceToHost);
 
     int bestIdx = min_element(fitCPU.begin(),fitCPU.end()) - fitCPU.begin();
-    int ga_len = fitCPU[bestIdx];
+    int ga_len  = fitCPU[bestIdx];
 
-    vector<int> opt = loadOptimal(OPT,N);
-    int opt_len=-1;
-    if(!opt.empty())
-        opt_len = tourLen(opt,N,distCPU);
+    // ======================================================================
+    // OPTIMAL TOUR
+    // ======================================================================
+    vector<int> opt = loadOptimal(OPT, N);
+    int opt_len = -1;
+
+    if (!opt.empty())
+        opt_len = tourLen(opt, N, distCPU);
 
     double err = -1;
-    if(opt_len > 0)
+    if (opt_len > 0)
         err = (ga_len - opt_len) * 100.0 / opt_len;
 
-    // CSV
-    bool header=false;
+    // ======================================================================
+    // WRITE CSV
+    // ======================================================================
+    bool header = false;
     {
         ifstream f("cuda_results.csv");
-        if(!f.good()) header=true;
+        if (!f.good()) header = true;
     }
 
-    ofstream fout("cuda_results.csv",ios::app);
-    if(header)
-        fout<<"dataset,pop,gen,time_sec,optimal_len,ga_len,error_percent\n";
+    ofstream fout("cuda_results.csv", ios::app);
+    if (header)
+        fout << "dataset,pop,gen,time_sec,optimal_len,ga_len,error_percent\n";
 
-    fout<<dataset<<","<<POP<<","<<GEN<<","<<time_sec<<","
-        <<opt_len<<","<<ga_len<<","<<err<<"\n";
+    fout << dataset << "," << POP << "," << GEN << ","
+         << time_sec << "," << opt_len << "," << ga_len
+         << "," << err << "\n";
 
-    cout<<"\n=== CUDA VALIDATION ===\n";
-    cout<<"Optimal length : "<<opt_len<<"\n";
-    cout<<"GA best length : "<<ga_len<<"\n";
-    cout<<"Error (%)      : "<<err<<"\n";
-    cout<<"Time (sec)     : "<<time_sec<<"\n";
+    // ======================================================================
+    // PRINT SUMMARY
+    // ======================================================================
+    cout << "\n=== CUDA VALIDATION ===\n";
+    cout << "Optimal length : " << opt_len << "\n";
+    cout << "GA best length : " << ga_len << "\n";
+    cout << "Error (%)      : " << err << "\n";
+    cout << "Time (sec)     : " << time_sec << "\n";
 
     return 0;
 }
