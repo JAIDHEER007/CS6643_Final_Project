@@ -18,11 +18,10 @@ echo ""
 # -----------------------------------------
 
 DATASETS=(
-    "datasets/xqf131.tsp:optimal_tours/xqf131.opt.tour"
-    "datasets/pka379.tsp:optimal_tours/pka379.opt.tour"
-    "datasets/pbk411.tsp:optimal_tours/pbk411.opt.tour"
-    "datasets/rbx711.tsp:optimal_tours/rbx711.opt.tour"
     "datasets/xit1083.tsp:optimal_tours/xit1083.opt.tour"
+    "datasets/rbv1583.tsp:optimal_tours/rbv1583.opt.tour"
+    "datasets/djb2036.tsp:optimal_tours/djb2036.opt.tour"
+    "datasets/xpr2308.tsp:optimal_tours/xpr2308.opt.tour"
 )
 
 # -----------------------------------------
@@ -33,12 +32,12 @@ POPS=(1024 2048 4096 8192)
 # -----------------------------------------
 # GENERATIONS
 # -----------------------------------------
-GENS=(100 200 400 600 800)
+GENS=(100 200 300 400 500 600 700 800 900 1000)
 
 # -----------------------------------------
 # THREAD counts for pthreads
 # -----------------------------------------
-THREADS=(2 4)
+THREADS=(2 4 8 16 20)
 
 # -----------------------------------------
 # SOURCE FILES
